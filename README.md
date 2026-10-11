@@ -140,3 +140,9 @@ volume was found. This firmware does not enable exFAT support and never
 formats the card automatically. LCD was disabled.
 Visual RGB output, button presses and audible microphone/speaker output still
 need human confirmation. The Hermes build was not flashed.
+
+After explicit user approval, the one-time format profile created a FAT volume
+on the inserted `AFGCC` SDHC card (15,193 MB reported capacity). It was then
+replaced with the normal self-test image. The final serial run reported
+`[PASS] microSD: ESP_OK` and `[PASS] audio loopback: ESP_OK`; the normal image
+has `AIVOX3_FORMAT_SD_ONCE` disabled, so it will not format other cards.
