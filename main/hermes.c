@@ -13,6 +13,7 @@
 #include "mqtt_client.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "cJSON.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -110,6 +111,61 @@ static void receive_audio(esp_mqtt_event_handle_t event)
     }
 }
 
+/* Hermes dialogue topics shown on the status display (filtered by siteId). */
+static const char *const dialog_topics[] = {
+    "hermes/dialogueManager/sessionStarted", "hermes/dialogueManager/sessionEnded",
+    "hermes/asr/startListening", "hermes/asr/textCaptured",
+    "hermes/nlu/intentNotRecognized", "hermes/intent/#", "hermes/tts/say",
+};
+
+static bool topic_is(const esp_mqtt_event_handle_t event, const char *name)
+{
+    size_t n = strlen(name);
+    return (size_t)event->topic_len >= n && !memcmp(event->topic, name, n);
+}
+
+static const char *json_string(const cJSON *object, const char *key)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(object, key);
+    return cJSON_IsString(item) ? item->valuestring : NULL;
+}
+
+static void show_text(dialog_phase_t phase, const char *text)
+{
+    status_dialog(phase, text, text ? strlen(text) : 0);
+}
+
+static void receive_dialog(esp_mqtt_event_handle_t event)
+{
+    if (event->data_len != event->total_data_len) {
+        ESP_LOGW(TAG, "ignoring %d-byte dialogue message", event->total_data_len);
+        return;
+    }
+    cJSON *msg = cJSON_ParseWithLength(event->data, event->data_len);
+    const char *site_id = json_string(msg, "siteId");
+    if (!site_id || strcmp(site_id, CONFIG_AIVOX3_HERMES_SITE_ID)) {
+        cJSON_Delete(msg);
+        return;
+    }
+    if (topic_is(event, "hermes/dialogueManager/sessionStarted")) {
+        show_text(DIALOG_SESSION, NULL);
+    } else if (topic_is(event, "hermes/dialogueManager/sessionEnded")) {
+        const char *reason = json_string(cJSON_GetObjectItemCaseSensitive(msg, "termination"), "reason");
+        show_text(DIALOG_ENDED, reason && strcmp(reason, "nominal") ? reason : NULL);
+    } else if (topic_is(event, "hermes/asr/startListening")) {
+        show_text(DIALOG_LISTENING, NULL);
+    } else if (topic_is(event, "hermes/asr/textCaptured")) {
+        show_text(DIALOG_HEARD, json_string(msg, "text"));
+    } else if (topic_is(event, "hermes/nlu/intentNotRecognized")) {
+        show_text(DIALOG_NOT_UNDERSTOOD, NULL);
+    } else if (topic_is(event, "hermes/intent/")) {
+        show_text(DIALOG_INTENT, json_string(cJSON_GetObjectItemCaseSensitive(msg, "intent"), "intentName"));
+    } else if (topic_is(event, "hermes/tts/say")) {
+        show_text(DIALOG_SPEAKING, json_string(msg, "text"));
+    }
+    cJSON_Delete(msg);
+}
+
 static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     esp_mqtt_event_handle_t event = data;
@@ -117,13 +173,19 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         mqtt_ready = true;
         status_set_state(playing ? STATUS_PLAYING : STATUS_CONNECTED);
         esp_mqtt_client_subscribe(event->client, play_subscription, 0);
+        for (size_t i = 0; i < sizeof(dialog_topics) / sizeof(dialog_topics[0]); ++i)
+            esp_mqtt_client_subscribe(event->client, dialog_topics[i], 0);
         ESP_LOGI(TAG, "MQTT connected; subscribed to %s", play_subscription);
     } else if (id == MQTT_EVENT_DISCONNECTED) {
         mqtt_ready = false;
         release_incoming();
         if (xEventGroupGetBits(wifi_events) & WIFI_READY) status_set_state(STATUS_MQTT);
         ESP_LOGW(TAG, "MQTT disconnected");
-    } else if (id == MQTT_EVENT_DATA) receive_audio(event);
+    } else if (id == MQTT_EVENT_DATA) {
+        /* Only the first chunk carries the topic; later chunks continue playBytes. */
+        if (event->current_data_offset == 0 && !topic_is(event, play_prefix)) receive_dialog(event);
+        else receive_audio(event);
+    }
     else if (id == MQTT_EVENT_ERROR) ESP_LOGE(TAG, "MQTT error");
 }
 

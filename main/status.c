@@ -10,13 +10,17 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lcd.h"
+#include "text.h"
 #include "ws2812.h"
 
 #define TICK_MS 20
-#define INFO_ROWS 7
+#define INFO_ROWS 9      /* 8 info rows + key hint */
 #define HEADER_H 48
-#define BAR_Y 204
-#define BAR_H 12
+#define ROW_Y(i) (52 + (i) * 18)
+#define BAR_Y 200
+#define BAR_H 10
+#define HINT_Y 222
+#define LINE_CHARS 28    /* (240 - 16) / 8 */
 
 static const char *TAG = "status";
 static const int volume_steps[] = {25, 40, 55, 70, 85, 100};
@@ -34,6 +38,54 @@ static volatile bool muted;
 static volatile uint32_t ip_addr, frames;
 static volatile int peak_level;
 static int volume;
+
+static portMUX_TYPE dialog_lock = portMUX_INITIALIZER_UNLOCKED;
+static dialog_phase_t dialog_phase;
+static char heard[LINE_CHARS + 1], intent[LINE_CHARS + 1], answer[2 * LINE_CHARS + 1], ended[LINE_CHARS + 1];
+
+void status_dialog(dialog_phase_t phase, const char *text, size_t len)
+{
+    char ascii[2 * LINE_CHARS + 1] = "";
+    if (text) text_to_ascii(text, len, ascii, sizeof(ascii));
+    portENTER_CRITICAL(&dialog_lock);
+    dialog_phase = phase;
+    switch (phase) {
+    case DIALOG_SESSION: heard[0] = intent[0] = answer[0] = ended[0] = '\0'; break;
+    case DIALOG_HEARD: strlcpy(heard, ascii, sizeof(heard)); break;
+    case DIALOG_INTENT: strlcpy(intent, ascii, sizeof(intent)); break;
+    case DIALOG_SPEAKING: strlcpy(answer, ascii, sizeof(answer)); break;
+    case DIALOG_ENDED: strlcpy(ended, ascii, sizeof(ended)); break;
+    default: break;
+    }
+    portEXIT_CRITICAL(&dialog_lock);
+}
+
+static const char *dialog_label(dialog_phase_t p)
+{
+    switch (p) {
+    case DIALOG_SESSION: return "Sitzung";
+    case DIALOG_LISTENING: return "hoert zu";
+    case DIALOG_HEARD: return "verarbeitet";
+    case DIALOG_INTENT: return "erkannt";
+    case DIALOG_NOT_UNDERSTOOD: return "nicht verstanden";
+    case DIALOG_SPEAKING: return "spricht";
+    case DIALOG_ENDED: return "bereit";
+    default: return "-";
+    }
+}
+
+/* Splits `text` at a space so that the first part fits one LCD line. */
+static void wrap(const char *text, char *line1, char *line2)
+{
+    size_t n = strlen(text);
+    size_t cut = n <= LINE_CHARS ? n : LINE_CHARS;
+    if (n > LINE_CHARS)
+        for (size_t i = LINE_CHARS; i > LINE_CHARS / 2; --i)
+            if (text[i] == ' ') { cut = i; break; }
+    snprintf(line1, LINE_CHARS + 1, "%.*s", (int)cut, text);
+    while (text[cut] == ' ') ++cut;
+    snprintf(line2, LINE_CHARS + 1, "%s", text + cut);
+}
 
 void status_set_state(status_state_t s) { state = s; }
 void status_set_error(const char *detail)
@@ -109,29 +161,40 @@ static int level_width(int peak)
 static void draw_info(char cache[INFO_ROWS][32], bool force)
 {
     char text[INFO_ROWS][32];
+    status_state_t s = state;
     wifi_ap_record_t ap;
     if (wifi_up && esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
-        snprintf(text[0], 32, "WLAN    %d dBm", ap.rssi);
-    else snprintf(text[0], 32, "WLAN    getrennt");
+        snprintf(text[0], 32, "WLAN %d dBm", ap.rssi);
+    else snprintf(text[0], 32, "WLAN getrennt");
     uint32_t ip = ip_addr;
-    if (ip) snprintf(text[1], 32, "IP      %" PRIu32 ".%" PRIu32 ".%" PRIu32 ".%" PRIu32,
+    if (ip) snprintf(text[1], 32, "IP   %" PRIu32 ".%" PRIu32 ".%" PRIu32 ".%" PRIu32,
                      ip & 0xff, ip >> 8 & 0xff, ip >> 16 & 0xff, ip >> 24);
-    else snprintf(text[1], 32, "IP      -");
-    status_state_t s = state;
-    snprintf(text[2], 32, "MQTT    %s", s == STATUS_CONNECTED || s == STATUS_PLAYING ? "verbunden" : "-");
-    snprintf(text[3], 32, "Site    %.20s", site);
-    snprintf(text[4], 32, "Volume  %d %%", volume);
-    snprintf(text[5], 32, "Frames  %" PRIu32, frames);
-    if (s == STATUS_ERROR && error_detail) snprintf(text[6], 32, "%.28s", error_detail);
+    else snprintf(text[1], 32, "IP   -");
+    snprintf(text[2], 32, "MQTT %-3s Vol %d%% %.8s",
+             s == STATUS_CONNECTED || s == STATUS_PLAYING ? "ok" : "-", volume, site);
+
+    char h[LINE_CHARS + 1], in[LINE_CHARS + 1], an[2 * LINE_CHARS + 1], en[LINE_CHARS + 1];
+    portENTER_CRITICAL(&dialog_lock);
+    dialog_phase_t p = dialog_phase;
+    memcpy(h, heard, sizeof(h)); memcpy(in, intent, sizeof(in));
+    memcpy(an, answer, sizeof(an)); memcpy(en, ended, sizeof(en));
+    portEXIT_CRITICAL(&dialog_lock);
+    if (s == STATUS_ERROR && error_detail) snprintf(text[3], 32, "%.28s", error_detail);
+    else if (p == DIALOG_ENDED && en[0]) snprintf(text[3], 32, "Rhasspy: %.19s", en);
+    else snprintf(text[3], 32, "Rhasspy: %s", dialog_label(p));
+    snprintf(text[4], 32, "> %.26s", h);
+    snprintf(text[5], 32, "Intent: %.20s", p == DIALOG_NOT_UNDERSTOOD ? "?" : in);
+    wrap(an, text[6], text[7]);
 #if CONFIG_AIVOX3_PUSH_TO_TALK
-    else snprintf(text[6], 32, "A halten=Sprechen B=Lautst.");
+    snprintf(text[8], 32, "A halten=Sprechen B=Lautst.");
 #else
-    else snprintf(text[6], 32, "A: Stumm  B: Lautst.");
+    snprintf(text[8], 32, "A: Stumm  B: Lautst.");
 #endif
     for (int i = 0; i < INFO_ROWS; ++i) {
         if (!force && !strcmp(cache[i], text[i])) continue;
-        lcd_text_row(HEADER_H + 8 + i * 20, text[i], 1,
-                     i == 6 ? LCD_RGB(150, 150, 150) : LCD_RGB(230, 230, 230), 0, false);
+        uint16_t fg = i == 8 ? LCD_RGB(150, 150, 150) : i >= 6 ? LCD_RGB(120, 220, 255)
+                    : i == 3 ? LCD_RGB(255, 210, 120) : LCD_RGB(230, 230, 230);
+        lcd_text_row(i == 8 ? HINT_Y : ROW_Y(i), text[i], 1, fg, 0, false);
         strcpy(cache[i], text[i]);
     }
 }
@@ -183,7 +246,7 @@ static void status_task(void *arg)
                 lcd_text_row(8, l.label, 2, LCD_RGB(255, 255, 255), l.lcd, true);
                 lcd_fill(0, 40, LCD_WIDTH, 8, l.lcd);
             }
-            if (changed || tick % (500 / TICK_MS) == 0) draw_info(cache, shown == (status_state_t)-1);
+            if (changed || tick % (200 / TICK_MS) == 0) draw_info(cache, shown == (status_state_t)-1);
             if (tick % (100 / TICK_MS) == 0) {
                 int w = s == STATUS_CONNECTED && m ? level_width(peak_level) : 0;
                 if (w != shown_bar) {

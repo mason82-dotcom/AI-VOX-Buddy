@@ -1,0 +1,24 @@
+# Rhasspy 2.5 base for the AI-VOX3 Hermes satellite. Install with rhasspy/install.sh.
+services:
+  rhasspy:
+    image: rhasspy/rhasspy:2.5.11
+    container_name: rhasspy
+    restart: unless-stopped
+    # Host network: Rhasspy reaches the local Mosquitto via localhost and the
+    # web UI listens on port 12101 (no authentication; keep it on the LAN).
+    network_mode: host
+    volumes:
+      - ${RHASSPY_PROFILES:-${HOME}/.config/rhasspy/profiles}:/profiles
+      - /etc/localtime:/etc/localtime:ro
+    command: --user-profiles /profiles --profile de
+
+  # Answers intents and ends the dialogue session (rhasspy/intent_handler.py).
+  intent-handler:
+    image: rhasspy/rhasspy:2.5.11
+    container_name: rhasspy-intent-handler
+    restart: unless-stopped
+    network_mode: host
+    entrypoint: ["/usr/lib/rhasspy/.venv/bin/python3", "/handler/intent_handler.py"]
+    volumes:
+      - ./intent_handler.py:/handler/intent_handler.py:ro
+      - /etc/localtime:/etc/localtime:ro
