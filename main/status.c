@@ -25,7 +25,12 @@ static es8311_handle_t codec;
 static const char *site = "";
 static volatile status_state_t state = STATUS_BOOT;
 static const char *volatile error_detail;
-static volatile bool wifi_up, muted;
+static volatile bool wifi_up, ptt_pressed;
+#if CONFIG_AIVOX3_PUSH_TO_TALK
+static volatile bool ptt_held;
+#else
+static volatile bool muted;
+#endif
 static volatile uint32_t ip_addr, frames;
 static volatile int peak_level;
 static int volume;
@@ -37,19 +42,34 @@ void status_set_error(const char *detail)
     state = STATUS_ERROR;
 }
 void status_set_wifi(bool connected, uint32_t ip) { wifi_up = connected; ip_addr = connected ? ip : 0; }
-bool status_mic_muted(void) { return muted; }
+#if CONFIG_AIVOX3_PUSH_TO_TALK
+bool status_mic_open(void) { return ptt_held; }
+#else
+bool status_mic_open(void) { return !muted; }
+#endif
+
+bool status_take_ptt_press(void)
+{
+    bool p = ptt_pressed;
+    ptt_pressed = false;
+    return p;
+}
 void status_note_frame(int peak) { ++frames; peak_level = peak; }
 
 typedef struct { const char *label; uint8_t r, g, b; uint16_t lcd; bool blink; } look_t;
 
-static look_t look(status_state_t s, bool mute)
+static look_t look(status_state_t s, bool open)
 {
     switch (s) {
     case STATUS_WIFI: return (look_t){"VERBINDE WLAN", 0, 0, 24, LCD_RGB(0, 70, 200), true};
     case STATUS_MQTT: return (look_t){"VERBINDE MQTT", 20, 14, 0, LCD_RGB(200, 140, 0), true};
-    case STATUS_LISTENING:
-        return mute ? (look_t){"STUMM", 24, 0, 0, LCD_RGB(200, 0, 0), false}
-                    : (look_t){"HOERT ZU", 0, 16, 0, LCD_RGB(0, 150, 60), false};
+    case STATUS_CONNECTED:
+        if (open) return (look_t){"HOERT ZU", 0, 24, 0, LCD_RGB(0, 150, 60), false};
+#if CONFIG_AIVOX3_PUSH_TO_TALK
+        return (look_t){"BEREIT", 5, 5, 5, LCD_RGB(70, 70, 80), false};
+#else
+        return (look_t){"STUMM", 24, 0, 0, LCD_RGB(200, 0, 0), false};
+#endif
     case STATUS_PLAYING: return (look_t){"SPRICHT", 0, 14, 18, LCD_RGB(0, 150, 170), false};
     case STATUS_ERROR: return (look_t){"FEHLER", 32, 0, 0, LCD_RGB(160, 0, 0), true};
     default: return (look_t){"START", 8, 8, 8, LCD_RGB(90, 90, 90), false};
@@ -98,12 +118,16 @@ static void draw_info(char cache[INFO_ROWS][32], bool force)
                      ip & 0xff, ip >> 8 & 0xff, ip >> 16 & 0xff, ip >> 24);
     else snprintf(text[1], 32, "IP      -");
     status_state_t s = state;
-    snprintf(text[2], 32, "MQTT    %s", s == STATUS_LISTENING || s == STATUS_PLAYING ? "verbunden" : "-");
+    snprintf(text[2], 32, "MQTT    %s", s == STATUS_CONNECTED || s == STATUS_PLAYING ? "verbunden" : "-");
     snprintf(text[3], 32, "Site    %.20s", site);
     snprintf(text[4], 32, "Volume  %d %%", volume);
     snprintf(text[5], 32, "Frames  %" PRIu32, frames);
     if (s == STATUS_ERROR && error_detail) snprintf(text[6], 32, "%.28s", error_detail);
+#if CONFIG_AIVOX3_PUSH_TO_TALK
+    else snprintf(text[6], 32, "A halten=Sprechen B=Lautst.");
+#else
     else snprintf(text[6], 32, "A: Stumm  B: Lautst.");
+#endif
     for (int i = 0; i < INFO_ROWS; ++i) {
         if (!force && !strcmp(cache[i], text[i])) continue;
         lcd_text_row(HEADER_H + 8 + i * 20, text[i], 1,
@@ -125,18 +149,27 @@ static void status_task(void *arg)
     bool shown_mute = false, led_on = false;
     int shown_bar = -1;
     for (uint32_t tick = 0;; ++tick) {
-        if (pressed(&a)) {
+        bool a_down = pressed(&a);
+#if CONFIG_AIVOX3_PUSH_TO_TALK
+        bool held = a.stable == 0 && state == STATUS_CONNECTED;
+        if (a_down && held) ptt_pressed = true;
+        if (held != ptt_held) ESP_LOGI(TAG, "push-to-talk %s", held ? "pressed" : "released");
+        ptt_held = held;
+#else
+        if (a_down) {
             muted = !muted;
             ESP_LOGI(TAG, "microphone %s", muted ? "muted" : "unmuted");
         }
+#endif
         if (pressed(&b)) {
             step = (step + 1) % (int)(sizeof(volume_steps) / sizeof(volume_steps[0]));
             set_volume(step);
         }
         status_state_t s = state;
-        bool m = muted;
+        bool m = status_mic_open();
         look_t l = look(s, m);
         bool changed = s != shown || m != shown_mute;
+        if (changed) ESP_LOGI(TAG, "state %s", l.label);
         /* Blink at 1 Hz; refresh steady colors once per second. */
         bool want_on = !l.blink || (tick * TICK_MS / 500) % 2 == 0;
         if (changed || want_on != led_on || tick % (1000 / TICK_MS) == 0) {
@@ -152,7 +185,7 @@ static void status_task(void *arg)
             }
             if (changed || tick % (500 / TICK_MS) == 0) draw_info(cache, shown == (status_state_t)-1);
             if (tick % (100 / TICK_MS) == 0) {
-                int w = s == STATUS_LISTENING && !m ? level_width(peak_level) : 0;
+                int w = s == STATUS_CONNECTED && m ? level_width(peak_level) : 0;
                 if (w != shown_bar) {
                     if (w > 0) lcd_fill(8, BAR_Y, w, BAR_H, w > LCD_WIDTH - 40 ? LCD_RGB(230, 60, 0) : LCD_RGB(0, 200, 80));
                     if (w < LCD_WIDTH - 16) lcd_fill(8 + w, BAR_Y, LCD_WIDTH - 16 - w, BAR_H, LCD_RGB(40, 40, 40));

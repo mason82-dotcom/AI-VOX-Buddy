@@ -22,6 +22,9 @@
 
 #define FRAME_SAMPLES 1600
 #define PLAY_CHUNK_SAMPLES 800
+/* After push-to-talk release: 300 ms of real audio, then 1 s of silence for VAD. */
+#define PTT_TAIL_FRAMES 3
+#define PTT_SILENCE_FRAMES 10
 #define MAX_PLAY_BYTES (512 * 1024)
 #define WIFI_READY BIT0
 
@@ -36,6 +39,9 @@ static char frame_topic[112];
 static char play_prefix[112];
 static char play_subscription[114];
 static char finished_topic[112];
+#if CONFIG_AIVOX3_PTT_HOTWORD
+static const char hotword_topic[] = "hermes/hotword/push-to-talk/detected";
+#endif
 
 typedef struct {
     uint8_t *wav;
@@ -109,7 +115,7 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     esp_mqtt_event_handle_t event = data;
     if (id == MQTT_EVENT_CONNECTED) {
         mqtt_ready = true;
-        status_set_state(playing ? STATUS_PLAYING : STATUS_LISTENING);
+        status_set_state(playing ? STATUS_PLAYING : STATUS_CONNECTED);
         esp_mqtt_client_subscribe(event->client, play_subscription, 0);
         ESP_LOGI(TAG, "MQTT connected; subscribed to %s", play_subscription);
     } else if (id == MQTT_EVENT_DISCONNECTED) {
@@ -155,7 +161,7 @@ static void playback_task(void *arg)
         /* Allow the final DMA buffers to drain before acknowledging playback. */
         if (good) vTaskDelay(pdMS_TO_TICKS(150));
         playing = false;
-        if (mqtt_ready) status_set_state(STATUS_LISTENING);
+        if (mqtt_ready) status_set_state(STATUS_CONNECTED);
         if (good && mqtt_ready) {
             char payload[160];
             int len = snprintf(payload, sizeof(payload), "{\"id\":\"%s\",\"siteId\":\"%s\"}",
@@ -235,11 +241,39 @@ void hermes_run(i2s_chan_handle_t rx, i2s_chan_handle_t tx)
     uint8_t *frame = heap_caps_malloc(WAV_HEADER_BYTES + FRAME_SAMPLES * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!frame) { ESP_LOGE(TAG, "no audio buffer"); return; }
     uint32_t frames = 0;
+#if CONFIG_AIVOX3_PUSH_TO_TALK
+    int tail = 0, silence = 0;
+#endif
     while (true) {
         size_t got = 0;
         err = i2s_channel_read(rx, frame + WAV_HEADER_BYTES, FRAME_SAMPLES * 2, &got, 500);
         if (err != ESP_OK || !got) { ESP_LOGW(TAG, "microphone read: %s", esp_err_to_name(err)); continue; }
-        if (!playing && mqtt_ready && got % 2 == 0 && !status_mic_muted()) {
+#if CONFIG_AIVOX3_PTT_HOTWORD
+        if (status_take_ptt_press() && mqtt_ready) {
+            char payload[200];
+            int len = snprintf(payload, sizeof(payload),
+                               "{\"modelId\":\"push-to-talk\",\"modelVersion\":\"\",\"modelType\":\"personal\","
+                               "\"currentSensitivity\":1.0,\"siteId\":\"%s\"}", CONFIG_AIVOX3_HERMES_SITE_ID);
+            if (len > 0 && len < sizeof(payload))
+                esp_mqtt_client_publish(mqtt, hotword_topic, payload, len, 0, 0);
+            ESP_LOGI(TAG, "push-to-talk: published hotword detected");
+        }
+#endif
+        bool open = status_mic_open();
+#if CONFIG_AIVOX3_PUSH_TO_TALK
+        if (open) {
+            tail = PTT_TAIL_FRAMES;
+            silence = PTT_SILENCE_FRAMES;
+        } else if (tail > 0) {
+            --tail;
+            open = true;
+        } else if (silence > 0) {
+            --silence;
+            memset(frame + WAV_HEADER_BYTES, 0, got);
+            open = true;
+        }
+#endif
+        if (!playing && mqtt_ready && got % 2 == 0 && open) {
             const int16_t *pcm = (const int16_t *)(frame + WAV_HEADER_BYTES);
             int peak = 0;
             for (size_t i = 0; i < got / 2; ++i) {

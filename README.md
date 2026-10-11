@@ -37,7 +37,7 @@ IDF_TOOLS_PATH="$PWD/.tools/espressif" .tools/esp-idf-v5.5.5/install.sh esp32s3
 
 The optional LCD defaults to disabled. Configure options with
 `source scripts/env.sh && idf.py menuconfig`; besides the LCD, the
-"AI-VOX3 hardware self-test" menu sets speaker volume (default 55) and
+"AI-VOX3 hardware self-test" menu sets speaker volume (default 40 %) and
 microphone gain (default 24 dB). `scripts/env.sh` can be sourced from an
 interactive shell; it does not change shell options.
 
@@ -68,17 +68,24 @@ implement them locally.
 
 ### Buttons, RGB LED and LCD status
 
-In Hermes mode, button **A** toggles the microphone mute (no `audioFrame`
-messages are published while muted) and button **B** steps the speaker
-volume through 25/40/55/70/85/100 %. Mute and volume reset to unmuted and the
-configured volume on reboot. The RGB LED and the LCD show the state:
+In Hermes mode, button **A** is push-to-talk (default): the microphone is
+streamed only while A is held, followed by 300 ms of real audio and 1 s of
+silence so a downstream VAD/ASR detects the end of speech. On press the
+satellite publishes `hermes/hotword/push-to-talk/detected`
+(`{"modelId":"push-to-talk",...,"siteId":"<siteId>"}`), which lets a Hermes
+dialogue manager such as Rhasspy start a session as if a wake word had been
+heard; both behaviors can be disabled in menuconfig. Without push-to-talk the
+microphone streams continuously and A toggles mute. Button **B** steps the
+speaker volume through 25/40/55/70/85/100 %; volume (and mute) reset to the
+configured defaults on reboot. The RGB LED and the LCD show the state:
 
 | State | LCD header | LED |
 |---|---|---|
 | Waiting for Wi-Fi | VERBINDE WLAN (blue) | blue, blinking |
 | Waiting for MQTT | VERBINDE MQTT (yellow) | yellow, blinking |
-| Streaming | HOERT ZU (green) | green |
-| Microphone muted | STUMM (red) | red |
+| Connected, microphone closed | BEREIT (grey) | dim white |
+| Streaming (A held) | HOERT ZU (green) | green |
+| Muted (continuous mode only) | STUMM (red) | red |
 | Playing `playBytes` | SPRICHT (cyan) | cyan |
 | Error | FEHLER (dark red) + cause | red, blinking |
 
@@ -216,3 +223,8 @@ watchdog_reset`, because an RTS hard reset left the chip in the bootloader.
 Status UI on-device test: buttons A/B toggled mute and stepped the volume
 (serial log), and the LCD status screen and RGB LED colors were visually
 confirmed by the user. The Hermes image with LCD is about 1,026 KB.
+
+Push-to-talk on-device test: with A released no Hermes messages were sent.
+Holding A for 2.5 s produced one `hotword/push-to-talk/detected` message,
+then 37 `audioFrame` messages over 3.6 s (hold time plus 0.3-s tail and 1-s
+silence), after which the stream stopped; the LCD switched HOERT ZU/BEREIT.
