@@ -11,7 +11,7 @@ mac="$(sed -n 's/^MAC: //p' <<<"$chip" | tail -1)"
 }
 build_dir="${AIVOX3_BUILD_DIR:-build}"
 case "$build_dir" in
-  build) ;;
+  build|build-lcd) ;;
   build-format)
     [[ "${AIVOX3_SD_FORMAT_APPROVED:-}" == yes ]] || {
       echo "Format profile requires AIVOX3_SD_FORMAT_APPROVED=yes." >&2; exit 13;
@@ -20,7 +20,7 @@ case "$build_dir" in
     [[ "${AIVOX3_HERMES_FLASH_APPROVED:-}" == yes ]] || {
       echo "Hermes profile embeds Wi-Fi/MQTT credentials; set AIVOX3_HERMES_FLASH_APPROVED=yes." >&2; exit 15;
     } ;;
-  *) echo "Only build, build-format or build-hermes may be flashed by this script." >&2; exit 14 ;;
+  *) echo "Only build, build-lcd, build-format or build-hermes may be flashed by this script." >&2; exit 14 ;;
 esac
 [[ -f "$PROJECT_DIR/$build_dir/ai_vox_buddy.bin" ]] || { echo "Build first." >&2; exit 6; }
 [[ "${AIVOX3_FLASH_APPROVED:-}" == yes ]] || {

@@ -191,6 +191,8 @@ static esp_err_t lcd_test(void)
     ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(panel), TAG, "LCD reset");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(panel), TAG, "LCD init");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(panel, true), TAG, "LCD invert");
+    /* esp_lcd's ST7789 init only leaves sleep mode; DISPON must be sent explicitly. */
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(panel, true), TAG, "LCD on");
     SemaphoreHandle_t transfer_done = xSemaphoreCreateBinary();
     if (!transfer_done) return ESP_ERR_NO_MEM;
     esp_lcd_panel_io_callbacks_t callbacks = {.on_color_trans_done = lcd_transfer_done};
