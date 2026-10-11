@@ -111,9 +111,9 @@ static esp_err_t audio_init(void)
     es8311_clock_config_t clk = {.mclk_frequency = 16000 * 384, .sample_frequency = 16000,
                                  .mclk_from_mclk_pin = true};
     ESP_RETURN_ON_ERROR(es8311_init(codec, &clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16), TAG, "ES8311");
-    ESP_RETURN_ON_ERROR(es8311_voice_volume_set(codec, 55, NULL), TAG, "volume");
+    ESP_RETURN_ON_ERROR(es8311_voice_volume_set(codec, CONFIG_AIVOX3_SPEAKER_VOLUME, NULL), TAG, "volume");
     ESP_RETURN_ON_ERROR(es8311_microphone_config(codec, false), TAG, "microphone");
-    return es8311_microphone_gain_set(codec, ES8311_MIC_GAIN_24DB);
+    return es8311_microphone_gain_set(codec, (es8311_mic_gain_t)(CONFIG_AIVOX3_MIC_GAIN_DB / 6));
 }
 
 static esp_err_t audio_loopback(void)
@@ -194,20 +194,32 @@ static esp_err_t lcd_test(void)
     SemaphoreHandle_t transfer_done = xSemaphoreCreateBinary();
     if (!transfer_done) return ESP_ERR_NO_MEM;
     esp_lcd_panel_io_callbacks_t callbacks = {.on_color_trans_done = lcd_transfer_done};
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_io_register_event_callbacks(io, &callbacks, transfer_done), TAG, "LCD callback");
+    esp_err_t err = esp_lcd_panel_io_register_event_callbacks(io, &callbacks, transfer_done);
     gpio_set_direction(AIVOX3_LCD_BL, GPIO_MODE_OUTPUT);
     gpio_set_level(AIVOX3_LCD_BL, 1);
+    /* ST7789 expects RGB565 big-endian over SPI; swap the little-endian words. */
+    static const uint16_t colors[] = {0x00f8 /* red */, 0xe007 /* green */, 0x1f00 /* blue */};
     uint16_t line[240];
-    for (int band = 0; band < 3; ++band) {
-        uint16_t color = band == 0 ? 0xf800 : band == 1 ? 0x07e0 : 0x001f;
-        for (int x = 0; x < 240; ++x) line[x] = color;
-        for (int y = band * 80; y < (band + 1) * 80; ++y) {
-            ESP_RETURN_ON_ERROR(esp_lcd_panel_draw_bitmap(panel, 0, y, 240, y + 1, line), TAG, "LCD draw");
-            if (xSemaphoreTake(transfer_done, pdMS_TO_TICKS(1000)) != pdTRUE) return ESP_ERR_TIMEOUT;
+    for (int band = 0; band < 3 && err == ESP_OK; ++band) {
+        for (int x = 0; x < 240; ++x) line[x] = colors[band];
+        for (int y = band * 80; y < (band + 1) * 80 && err == ESP_OK; ++y) {
+            err = esp_lcd_panel_draw_bitmap(panel, 0, y, 240, y + 1, line);
+            if (err == ESP_OK && xSemaphoreTake(transfer_done, pdMS_TO_TICKS(1000)) != pdTRUE)
+                err = ESP_ERR_TIMEOUT;
         }
     }
     vSemaphoreDelete(transfer_done);
-    return ESP_OK;
+    return err;
+}
+#endif
+
+#if CONFIG_AIVOX3_HERMES_ENABLE
+/* Wi-Fi, MQTT publishing and logging need more stack than the main task has. */
+static void hermes_task(void *arg)
+{
+    hermes_run(rx_chan, tx_chan);
+    ESP_LOGE(TAG, "Hermes stopped; reset the board after fixing the configuration");
+    vTaskDelete(NULL);
 }
 #endif
 
@@ -231,11 +243,13 @@ void app_main(void)
 #endif
     ESP_LOGI(TAG, "self-test complete");
 #if CONFIG_AIVOX3_HERMES_ENABLE
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "starting Hermes voice satellite");
-        hermes_run(rx_chan, tx_chan);
-    } else {
+    if (err != ESP_OK) {
         ESP_LOGE(TAG, "Hermes disabled: ES8311/I2S initialization failed");
+    } else if (xTaskCreate(hermes_task, "hermes", 8192, NULL, 5, NULL) == pdPASS) {
+        ESP_LOGI(TAG, "starting Hermes voice satellite");
+        vTaskDelete(NULL);
+    } else {
+        ESP_LOGE(TAG, "Hermes disabled: task creation failed");
     }
 #endif
     ESP_LOGI(TAG, "reporting buttons every second");

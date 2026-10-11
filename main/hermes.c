@@ -17,8 +17,10 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "wav.h"
 
 #define FRAME_SAMPLES 1600
+#define PLAY_CHUNK_SAMPLES 800
 #define MAX_PLAY_BYTES (512 * 1024)
 #define WIFI_READY BIT0
 
@@ -41,47 +43,6 @@ typedef struct {
 } play_job_t;
 
 static play_job_t incoming;
-
-static uint16_t le16(const uint8_t *p) { return (uint16_t)p[0] | (uint16_t)p[1] << 8; }
-static uint32_t le32(const uint8_t *p)
-{
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
-}
-static void put16(uint8_t *p, uint16_t v) { p[0] = v; p[1] = v >> 8; }
-static void put32(uint8_t *p, uint32_t v)
-{
-    p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24;
-}
-
-static void wav_header(uint8_t *p, uint32_t samples)
-{
-    memcpy(p, "RIFF", 4); put32(p + 4, samples * 2 + 36);
-    memcpy(p + 8, "WAVEfmt ", 8); put32(p + 16, 16);
-    put16(p + 20, 1); put16(p + 22, 1); put32(p + 24, 16000);
-    put32(p + 28, 32000); put16(p + 32, 2); put16(p + 34, 16);
-    memcpy(p + 36, "data", 4); put32(p + 40, samples * 2);
-}
-
-/* Accept PCM16/mono/16 kHz WAV, including extra RIFF chunks before data. */
-static bool wav_pcm(const uint8_t *wav, size_t len, const uint8_t **pcm, size_t *bytes)
-{
-    if (len < 44 || memcmp(wav, "RIFF", 4) || memcmp(wav + 8, "WAVE", 4)) return false;
-    bool fmt_ok = false;
-    size_t offset = 12;
-    while (offset + 8 <= len) {
-        uint32_t size = le32(wav + offset + 4);
-        size_t data = offset + 8;
-        if (size > len - data) return false;
-        if (!memcmp(wav + offset, "fmt ", 4) && size >= 16) {
-            fmt_ok = le16(wav + data) == 1 && le16(wav + data + 2) == 1 &&
-                     le32(wav + data + 4) == 16000 && le16(wav + data + 14) == 16;
-        } else if (!memcmp(wav + offset, "data", 4) && fmt_ok) {
-            *pcm = wav + data; *bytes = size & ~1U; return true;
-        }
-        offset = data + size + (size & 1U);
-    }
-    return false;
-}
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -112,14 +73,14 @@ static void receive_audio(esp_mqtt_event_handle_t event)
                         event->topic_len - prefix_len : 0;
         if (event->topic_len <= (int)prefix_len ||
             memcmp(event->topic, play_prefix, prefix_len) ||
-            id_len > 64 || event->total_data_len < 44 ||
+            id_len > 64 || event->total_data_len < WAV_HEADER_BYTES ||
             event->total_data_len > MAX_PLAY_BYTES) {
             ESP_LOGW(TAG, "ignoring invalid/oversize playBytes");
             return;
         }
-        for (size_t i = 0; i < id_len; ++i) {
-            unsigned char ch = event->topic[prefix_len + i];
-            if (!isalnum(ch) && ch != '-' && ch != '_') return;
+        if (!hermes_id_valid(event->topic + prefix_len, id_len)) {
+            ESP_LOGW(TAG, "ignoring playBytes with unsupported request ID");
+            return;
         }
         memcpy(incoming.id, event->topic + prefix_len, id_len);
         incoming.size = event->total_data_len;
@@ -153,28 +114,36 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     else if (id == MQTT_EVENT_ERROR) ESP_LOGE(TAG, "MQTT error");
 }
 
+static bool play_pcm(const wav_info_t *info)
+{
+    static int16_t out[PLAY_CHUNK_SAMPLES];
+    uint64_t pos = 0;
+    size_t n;
+    while ((n = wav_convert(info, &pos, out, PLAY_CHUNK_SAMPLES)) > 0) {
+        size_t sent = 0;
+        if (i2s_channel_write(speaker, out, n * 2, &sent, 500) != ESP_OK || sent != n * 2) {
+            ESP_LOGE(TAG, "I2S playback failed");
+            return false;
+        }
+    }
+    return true;
+}
+
 static void playback_task(void *arg)
 {
     play_job_t job;
     while (xQueueReceive(play_queue, &job, portMAX_DELAY) == pdTRUE) {
-        const uint8_t *pcm;
-        size_t bytes;
-        if (!wav_pcm(job.wav, job.size, &pcm, &bytes)) {
-            ESP_LOGW(TAG, "playBytes %s: only PCM16 mono 16 kHz WAV supported", job.id);
+        wav_info_t info;
+        if (!wav_parse(job.wav, job.size, &info)) {
+            ESP_LOGW(TAG, "playBytes %s: only PCM16 WAV, mono/stereo, 8..48 kHz supported", job.id);
             free(job.wav);
             continue;
         }
+        if (info.rate != WAV_OUTPUT_RATE || info.channels != 1)
+            ESP_LOGI(TAG, "playBytes %s: converting %" PRIu32 " Hz/%u ch to 16 kHz mono",
+                     job.id, info.rate, info.channels);
         playing = true;
-        bool good = true;
-        for (size_t offset = 0; offset < bytes;) {
-            size_t chunk = bytes - offset > 3200 ? 3200 : bytes - offset;
-            size_t sent = 0;
-            if (i2s_channel_write(speaker, pcm + offset, chunk, &sent,
-                                  500) != ESP_OK || sent != chunk) {
-                ESP_LOGE(TAG, "I2S playback failed"); good = false; break;
-            }
-            offset += chunk;
-        }
+        bool good = play_pcm(&info);
         /* Allow the final DMA buffers to drain before acknowledging playback. */
         if (good) vTaskDelay(pdMS_TO_TICKS(150));
         playing = false;
@@ -230,6 +199,8 @@ void hermes_run(i2s_chan_handle_t rx, i2s_chan_handle_t tx)
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_set_config(WIFI_IF_STA, &config);
     esp_wifi_start();
+    /* Modem sleep adds latency and jitter to the continuous audio stream. */
+    esp_wifi_set_ps(WIFI_PS_NONE);
     ESP_LOGI(TAG, "waiting for Wi-Fi");
     xEventGroupWaitBits(wifi_events, WIFI_READY, pdFALSE, pdTRUE, portMAX_DELAY);
     esp_mqtt_client_config_t mqtt_config = {
@@ -243,19 +214,21 @@ void hermes_run(i2s_chan_handle_t rx, i2s_chan_handle_t tx)
     if (!mqtt) { ESP_LOGE(TAG, "MQTT init failed"); return; }
     esp_mqtt_client_register_event(mqtt, ESP_EVENT_ANY_ID, mqtt_event, NULL);
     if (esp_mqtt_client_start(mqtt) != ESP_OK) { ESP_LOGE(TAG, "MQTT start failed"); return; }
-    xTaskCreate(playback_task, "hermes_play", 6144, NULL, 5, NULL);
-    uint8_t *frame = heap_caps_malloc(44 + FRAME_SAMPLES * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (xTaskCreate(playback_task, "hermes_play", 6144, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "playback task creation failed"); return;
+    }
+    uint8_t *frame = heap_caps_malloc(WAV_HEADER_BYTES + FRAME_SAMPLES * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!frame) { ESP_LOGE(TAG, "no audio buffer"); return; }
     uint32_t frames = 0;
     while (true) {
         size_t got = 0;
-        err = i2s_channel_read(rx, frame + 44, FRAME_SAMPLES * 2, &got, 500);
+        err = i2s_channel_read(rx, frame + WAV_HEADER_BYTES, FRAME_SAMPLES * 2, &got, 500);
         if (err != ESP_OK || !got) { ESP_LOGW(TAG, "microphone read: %s", esp_err_to_name(err)); continue; }
         if (!playing && mqtt_ready && got % 2 == 0) {
             wav_header(frame, got / 2);
-            if (esp_mqtt_client_publish(mqtt, frame_topic, (char *)frame, got + 44, 0, 0) >= 0)
-                ++frames;
-            if (frames && frames % 100 == 0) ESP_LOGI(TAG, "published %" PRIu32 " audio frames", frames);
+            if (esp_mqtt_client_publish(mqtt, frame_topic, (char *)frame, got + WAV_HEADER_BYTES, 0, 0) >= 0 &&
+                ++frames % 100 == 0)
+                ESP_LOGI(TAG, "published %" PRIu32 " audio frames", frames);
         }
     }
 }

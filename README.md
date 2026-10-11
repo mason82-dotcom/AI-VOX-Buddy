@@ -36,7 +36,21 @@ IDF_TOOLS_PATH="$PWD/.tools/espressif" .tools/esp-idf-v5.5.5/install.sh esp32s3
 ```
 
 The optional LCD defaults to disabled. Configure options with
-`source scripts/env.sh && idf.py menuconfig`.
+`source scripts/env.sh && idf.py menuconfig`; besides the LCD, the
+"AI-VOX3 hardware self-test" menu sets speaker volume (default 55) and
+microphone gain (default 24 dB). `scripts/env.sh` can be sourced from an
+interactive shell; it does not change shell options.
+
+`partitions.csv` keeps ESP-IDF's default NVS/PHY offsets but enlarges the
+factory app to 4 MB: a fully configured Hermes image is about 1,010 KB and
+left only 1 % of the former 1-MB app partition free. Flashing writes the new
+partition table automatically; NVS data is preserved. Generated `sdkconfig*`
+files created before this change still select the old table, so either
+delete them (they are regenerated from the defaults) or select
+"Custom partition table CSV" in menuconfig.
+
+The WAV parsing and resampling code has no ESP-IDF dependency and is tested on
+the host with `./scripts/test-host.sh` (gcc/clang with ASan/UBSan).
 Its separate build profile can be checked without changing the normal build:
 `source scripts/env.sh && idf.py -B build-lcd -DSDKCONFIG=sdkconfig.lcd -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.lcd.defaults" build`.
 
@@ -44,8 +58,9 @@ Its separate build profile can be checked without changing the normal build:
 
 The optional mode publishes 100-ms, PCM16/16-kHz/mono WAV chunks from the
 ES8311 microphone to `hermes/audioServer/<siteId>/audioFrame`. It subscribes
-to `hermes/audioServer/<siteId>/playBytes/+`, plays PCM16/16-kHz/mono WAV
-through ES8311/I2S, and publishes `hermes/audioServer/<siteId>/playFinished`
+to `hermes/audioServer/<siteId>/playBytes/+`, plays PCM16 WAV (mono or stereo,
+8..48 kHz, e.g. Piper's 22.05 kHz output) through ES8311/I2S after converting it
+to 16-kHz mono with linear interpolation, and publishes `hermes/audioServer/<siteId>/playFinished`
 with the request ID after playback. Microphone publishing pauses during
 speaker playback. Wake-word recognition, ASR, NLU, and dialogue management
 are expected to run elsewhere on the MQTT network; this firmware does not
@@ -64,10 +79,15 @@ idf.py -B build-hermes -DSDKCONFIG=sdkconfig.hermes \
 
 The generated `sdkconfig.hermes` is Git-ignored because credentials become
 part of both that file and the firmware image. Do not share either. The
-default build has Hermes disabled and needs no credentials. The implementation
-accepts only PCM16/16-kHz/mono WAV for playback, with a 512-KB message limit;
-other formats and longer TTS messages need resampling/chunking upstream or a
-future decoder. Use an MQTT broker on a trusted local network; TLS certificate
+default build has Hermes disabled and needs no credentials. Playback accepts
+only 16-bit PCM WAV, with a 512-KB message limit; compressed or float formats
+and longer TTS messages need conversion/chunking upstream. Request IDs must be
+1..64 printable ASCII characters without space, quote, backslash, `/`, `+` or
+`#`. Wi-Fi power saving is disabled in this mode to keep audio latency low.
+The satellite runs in its own 8-KB task. To flash it, use
+`AIVOX3_BUILD_DIR=build-hermes AIVOX3_HERMES_FLASH_APPROVED=yes` in addition to
+the normal flash variables below, and `AIVOX3_BUILD_DIR=build-hermes
+./scripts/monitor.sh` to decode its logs with the matching ELF. Use an MQTT broker on a trusted local network; TLS certificate
 provisioning is not implemented yet. This is an initial Hermes audio endpoint,
 not a validated production satellite.
 
@@ -124,7 +144,9 @@ label before approval. The serial self-test reports chip/flash/PSRAM identity,
 cycles RGB, probes ES8311, runs microphone-to-speaker I2S loopback, probes
 microSD and continuously reports button states at 115200 baud.
 The RGB and LCD tests can only confirm their driver calls in software; their
-actual light and picture must be checked by eye. A speaker must be connected
+actual light and picture must be checked by eye. The LCD should show red,
+green and blue horizontal bands from top to bottom (RGB565 is byte-swapped
+for the ST7789's big-endian SPI format). A speaker must be connected
 to hear the microphone loopback.
 
 ## Device validation (2026-10-11)

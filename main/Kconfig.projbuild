@@ -6,6 +6,16 @@ menu "AI-VOX3 hardware self-test"
         int "Audio loopback duration in seconds"
         range 0 10
         default 2
+    config AIVOX3_SPEAKER_VOLUME
+        int "Speaker volume (0..100)"
+        range 0 100
+        default 55
+    config AIVOX3_MIC_GAIN_DB
+        int "Microphone PGA gain in dB (multiple of 6)"
+        range 0 42
+        default 24
+        help
+            Rounded down to the nearest 6-dB step supported by the ES8311.
     config AIVOX3_FORMAT_SD_ONCE
         bool "DANGER: format inserted microSD if it has no valid FAT volume"
         default n
