@@ -17,6 +17,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "status.h"
 #include "wav.h"
 
 #define FRAME_SAMPLES 1600
@@ -50,10 +51,14 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(wifi_events, WIFI_READY);
         mqtt_ready = false;
+        status_set_wifi(false, 0);
+        status_set_state(STATUS_WIFI);
         ESP_LOGW(TAG, "Wi-Fi disconnected; reconnecting");
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         xEventGroupSetBits(wifi_events, WIFI_READY);
+        status_set_wifi(true, ((ip_event_got_ip_t *)data)->ip_info.ip.addr);
+        status_set_state(STATUS_MQTT);
         ESP_LOGI(TAG, "Wi-Fi connected");
     }
 }
@@ -104,11 +109,13 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     esp_mqtt_event_handle_t event = data;
     if (id == MQTT_EVENT_CONNECTED) {
         mqtt_ready = true;
+        status_set_state(playing ? STATUS_PLAYING : STATUS_LISTENING);
         esp_mqtt_client_subscribe(event->client, play_subscription, 0);
         ESP_LOGI(TAG, "MQTT connected; subscribed to %s", play_subscription);
     } else if (id == MQTT_EVENT_DISCONNECTED) {
         mqtt_ready = false;
         release_incoming();
+        if (xEventGroupGetBits(wifi_events) & WIFI_READY) status_set_state(STATUS_MQTT);
         ESP_LOGW(TAG, "MQTT disconnected");
     } else if (id == MQTT_EVENT_DATA) receive_audio(event);
     else if (id == MQTT_EVENT_ERROR) ESP_LOGE(TAG, "MQTT error");
@@ -143,10 +150,12 @@ static void playback_task(void *arg)
             ESP_LOGI(TAG, "playBytes %s: converting %" PRIu32 " Hz/%u ch to 16 kHz mono",
                      job.id, info.rate, info.channels);
         playing = true;
+        status_set_state(STATUS_PLAYING);
         bool good = play_pcm(&info);
         /* Allow the final DMA buffers to drain before acknowledging playback. */
         if (good) vTaskDelay(pdMS_TO_TICKS(150));
         playing = false;
+        if (mqtt_ready) status_set_state(STATUS_LISTENING);
         if (good && mqtt_ready) {
             char payload[160];
             int len = snprintf(payload, sizeof(payload), "{\"id\":\"%s\",\"siteId\":\"%s\"}",
@@ -162,15 +171,18 @@ void hermes_run(i2s_chan_handle_t rx, i2s_chan_handle_t tx)
 {
     if (!CONFIG_AIVOX3_WIFI_SSID[0] || !CONFIG_AIVOX3_MQTT_URI[0]) {
         ESP_LOGE(TAG, "set Wi-Fi SSID and MQTT URI in menuconfig; satellite not started");
+        status_set_error("WLAN/MQTT nicht gesetzt");
         return;
     }
     const char *site = CONFIG_AIVOX3_HERMES_SITE_ID;
     if (!site[0] || strlen(site) > 48) {
-        ESP_LOGE(TAG, "site ID must contain 1..48 characters"); return;
+        ESP_LOGE(TAG, "site ID must contain 1..48 characters");
+        status_set_error("Site-ID ungueltig"); return;
     }
     for (const char *p = site; *p; ++p)
         if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_') {
-            ESP_LOGE(TAG, "site ID contains invalid character"); return;
+            ESP_LOGE(TAG, "site ID contains invalid character");
+            status_set_error("Site-ID ungueltig"); return;
         }
     snprintf(frame_topic, sizeof(frame_topic), "hermes/audioServer/%s/audioFrame", site);
     snprintf(play_prefix, sizeof(play_prefix), "hermes/audioServer/%s/playBytes/", site);
@@ -203,6 +215,7 @@ void hermes_run(i2s_chan_handle_t rx, i2s_chan_handle_t tx)
     /* Lower latency, but the constant RF activity can disturb USB on this board. */
     esp_wifi_set_ps(WIFI_PS_NONE);
 #endif
+    status_set_state(STATUS_WIFI);
     ESP_LOGI(TAG, "waiting for Wi-Fi");
     xEventGroupWaitBits(wifi_events, WIFI_READY, pdFALSE, pdTRUE, portMAX_DELAY);
     esp_mqtt_client_config_t mqtt_config = {
@@ -226,7 +239,14 @@ void hermes_run(i2s_chan_handle_t rx, i2s_chan_handle_t tx)
         size_t got = 0;
         err = i2s_channel_read(rx, frame + WAV_HEADER_BYTES, FRAME_SAMPLES * 2, &got, 500);
         if (err != ESP_OK || !got) { ESP_LOGW(TAG, "microphone read: %s", esp_err_to_name(err)); continue; }
-        if (!playing && mqtt_ready && got % 2 == 0) {
+        if (!playing && mqtt_ready && got % 2 == 0 && !status_mic_muted()) {
+            const int16_t *pcm = (const int16_t *)(frame + WAV_HEADER_BYTES);
+            int peak = 0;
+            for (size_t i = 0; i < got / 2; ++i) {
+                int v = pcm[i] < 0 ? -pcm[i] : pcm[i];
+                if (v > peak) peak = v;
+            }
+            status_note_frame(peak);
             wav_header(frame, got / 2);
             if (esp_mqtt_client_publish(mqtt, frame_topic, (char *)frame, got + WAV_HEADER_BYTES, 0, 0) >= 0 &&
                 ++frames % 100 == 0)

@@ -4,27 +4,26 @@
 #include "driver/i2c.h"
 #include "driver/i2s_std.h"
 #include "driver/sdmmc_host.h"
-#include "driver/spi_master.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
 #include "esp_idf_version.h"
 #include "esp_check.h"
-#include "esp_lcd_panel_io.h"
-#include "esp_lcd_panel_ops.h"
-#include "esp_lcd_panel_vendor.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_vfs_fat.h"
 #include "es8311.h"
 #include "hermes.h"
+#include "lcd.h"
+#include "status.h"
+#include "ws2812.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "sdmmc_cmd.h"
 
 static const char *TAG = "ai-vox3-test";
 static i2s_chan_handle_t rx_chan, tx_chan;
+static es8311_handle_t codec;
 
 static void result(const char *test, esp_err_t err)
 {
@@ -54,32 +53,14 @@ static esp_err_t buttons_init(void)
     return gpio_config(&cfg);
 }
 
-/* Encode WS2812 bits as 100 (zero) and 110 (one), clocked at 2.5 MHz. */
 static esp_err_t rgb_test(void)
 {
-    spi_bus_config_t bus = {.mosi_io_num = AIVOX3_RGB, .miso_io_num = -1, .sclk_io_num = -1,
-                            .quadwp_io_num = -1, .quadhd_io_num = -1, .max_transfer_sz = 9};
-    esp_err_t err = spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_DISABLED);
-    if (err != ESP_OK) return err;
-    spi_device_interface_config_t dc = {.clock_speed_hz = 2500000, .mode = 0,
-                                        .spics_io_num = -1, .queue_size = 1};
-    spi_device_handle_t dev;
-    if ((err = spi_bus_add_device(SPI2_HOST, &dc, &dev)) != ESP_OK) return err;
-    const uint8_t colors[][3] = {{0, 16, 0}, {16, 0, 0}, {0, 0, 16}, {0, 0, 0}};
+    esp_err_t err = ws2812_init();
+    const uint8_t colors[][3] = {{16, 0, 0}, {0, 16, 0}, {0, 0, 16}, {0, 0, 0}};
     for (unsigned c = 0; c < 4 && err == ESP_OK; ++c) {
-        uint8_t encoded[9] = {0};
-        unsigned p = 0;
-        for (unsigned b = 0; b < 3; ++b) for (int bit = 7; bit >= 0; --bit) {
-            unsigned symbol = colors[c][b] & BIT(bit) ? 6 : 4;
-            for (int s = 2; s >= 0; --s, ++p)
-                encoded[p / 8] |= ((symbol >> s) & 1U) << (7 - p % 8);
-        }
-        spi_transaction_t t = {.length = 72, .tx_buffer = encoded};
-        err = spi_device_transmit(dev, &t);
+        err = ws2812_set(colors[c][0], colors[c][1], colors[c][2]);
         vTaskDelay(pdMS_TO_TICKS(150));
     }
-    spi_bus_remove_device(dev);
-    spi_bus_free(SPI2_HOST);
     return err;
 }
 
@@ -106,7 +87,7 @@ static esp_err_t audio_init(void)
         .clk_flags = 0};
     ESP_RETURN_ON_ERROR(i2c_param_config(I2C_NUM_0, &ic), TAG, "I2C config");
     ESP_RETURN_ON_ERROR(i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0), TAG, "I2C driver");
-    es8311_handle_t codec = es8311_create(I2C_NUM_0, ES8311_ADDRRES_0);
+    codec = es8311_create(I2C_NUM_0, ES8311_ADDRRES_0);
     if (!codec) return ESP_ERR_NO_MEM;
     es8311_clock_config_t clk = {.mclk_frequency = 16000 * 384, .sample_frequency = 16000,
                                  .mclk_from_mclk_pin = true};
@@ -165,53 +146,13 @@ static esp_err_t sd_test(void)
 }
 
 #if CONFIG_AIVOX3_ENABLE_LCD
-static bool lcd_transfer_done(esp_lcd_panel_io_handle_t io, esp_lcd_panel_io_event_data_t *event, void *context)
-{
-    BaseType_t woken = pdFALSE;
-    xSemaphoreGiveFromISR((SemaphoreHandle_t)context, &woken);
-    return woken == pdTRUE;
-}
-
 static esp_err_t lcd_test(void)
 {
-    spi_bus_config_t bus = {.sclk_io_num = AIVOX3_LCD_SCLK, .mosi_io_num = AIVOX3_LCD_MOSI,
-        .miso_io_num = -1, .quadwp_io_num = -1, .quadhd_io_num = -1,
-        .max_transfer_sz = 240 * 16 * 2};
-    ESP_RETURN_ON_ERROR(spi_bus_initialize(SPI3_HOST, &bus, SPI_DMA_CH_AUTO), TAG, "LCD SPI");
-    esp_lcd_panel_io_spi_config_t io_cfg = {.dc_gpio_num = AIVOX3_LCD_DC,
-        .cs_gpio_num = AIVOX3_LCD_CS, .pclk_hz = 20 * 1000 * 1000,
-        .lcd_cmd_bits = 8, .lcd_param_bits = 8, .spi_mode = 0, .trans_queue_depth = 1};
-    esp_lcd_panel_io_handle_t io;
-    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI3_HOST,
-                                                 &io_cfg, &io), TAG, "LCD IO");
-    esp_lcd_panel_dev_config_t pc = {.reset_gpio_num = GPIO_NUM_NC,
-        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB, .bits_per_pixel = 16};
-    esp_lcd_panel_handle_t panel;
-    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_st7789(io, &pc, &panel), TAG, "ST7789");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(panel), TAG, "LCD reset");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_init(panel), TAG, "LCD init");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(panel, true), TAG, "LCD invert");
-    /* esp_lcd's ST7789 init only leaves sleep mode; DISPON must be sent explicitly. */
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(panel, true), TAG, "LCD on");
-    SemaphoreHandle_t transfer_done = xSemaphoreCreateBinary();
-    if (!transfer_done) return ESP_ERR_NO_MEM;
-    esp_lcd_panel_io_callbacks_t callbacks = {.on_color_trans_done = lcd_transfer_done};
-    esp_err_t err = esp_lcd_panel_io_register_event_callbacks(io, &callbacks, transfer_done);
-    gpio_set_direction(AIVOX3_LCD_BL, GPIO_MODE_OUTPUT);
-    gpio_set_level(AIVOX3_LCD_BL, 1);
-    /* ST7789 expects RGB565 big-endian over SPI; swap the little-endian words. */
-    static const uint16_t colors[] = {0x00f8 /* red */, 0xe007 /* green */, 0x1f00 /* blue */};
-    uint16_t line[240];
-    for (int band = 0; band < 3 && err == ESP_OK; ++band) {
-        for (int x = 0; x < 240; ++x) line[x] = colors[band];
-        for (int y = band * 80; y < (band + 1) * 80 && err == ESP_OK; ++y) {
-            err = esp_lcd_panel_draw_bitmap(panel, 0, y, 240, y + 1, line);
-            if (err == ESP_OK && xSemaphoreTake(transfer_done, pdMS_TO_TICKS(1000)) != pdTRUE)
-                err = ESP_ERR_TIMEOUT;
-        }
-    }
-    vSemaphoreDelete(transfer_done);
-    return err;
+    ESP_RETURN_ON_ERROR(lcd_init(), TAG, "LCD init");
+    ESP_RETURN_ON_ERROR(lcd_fill(0, 0, LCD_WIDTH, 80, LCD_RGB(255, 0, 0)), TAG, "red");
+    ESP_RETURN_ON_ERROR(lcd_fill(0, 80, LCD_WIDTH, 80, LCD_RGB(0, 255, 0)), TAG, "green");
+    ESP_RETURN_ON_ERROR(lcd_fill(0, 160, LCD_WIDTH, 80, LCD_RGB(0, 0, 255)), TAG, "blue");
+    return lcd_text_row(112, "AI-VOX3", 2, LCD_RGB(0, 0, 0), LCD_RGB(0, 255, 0), true);
 }
 #endif
 
@@ -221,6 +162,7 @@ static void hermes_task(void *arg)
 {
     hermes_run(rx_chan, tx_chan);
     ESP_LOGE(TAG, "Hermes stopped; reset the board after fixing the configuration");
+    status_set_error("Hermes gestoppt");
     vTaskDelete(NULL);
 }
 #endif
@@ -247,11 +189,14 @@ void app_main(void)
 #if CONFIG_AIVOX3_HERMES_ENABLE
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Hermes disabled: ES8311/I2S initialization failed");
-    } else if (xTaskCreate(hermes_task, "hermes", 8192, NULL, 5, NULL) == pdPASS) {
-        ESP_LOGI(TAG, "starting Hermes voice satellite");
-        vTaskDelete(NULL);
     } else {
+        status_start(codec, CONFIG_AIVOX3_HERMES_SITE_ID);
+        if (xTaskCreate(hermes_task, "hermes", 8192, NULL, 5, NULL) == pdPASS) {
+            ESP_LOGI(TAG, "starting Hermes voice satellite");
+            vTaskDelete(NULL);
+        }
         ESP_LOGE(TAG, "Hermes disabled: task creation failed");
+        status_set_error("Hermes-Task fehlt");
     }
 #endif
     ESP_LOGI(TAG, "reporting buttons every second");
