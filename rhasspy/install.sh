@@ -16,14 +16,16 @@ wait_ready() {
 mkdir -p "$PROFILES/de"
 install -m 644 "$DIR/profile/profile.json" "$DIR/profile/sentences.ini" "$PROFILES/de/"
 install -m 755 "$DIR/profile/tts.sh" "$PROFILES/de/"
+mkdir -p "$PROFILES/de/slots"
+install -m 644 "$DIR"/profile/slots/* "$PROFILES/de/slots/"
 mkdir -p "$PROFILES/de/sounds"
 install -m 644 "$DIR"/profile/sounds/*.wav "$PROFILES/de/sounds/"
 rm -f "$PROFILES/de/handle.py"   # replaced by the intent-handler container
 RHASSPY_PROFILES="$PROFILES" docker compose -f "$DIR/docker-compose.yml" up -d
 # Rhasspy generates its service configuration (supervisord.conf) only when the
 # container starts; POST /api/restart keeps the old services. Restart the
-# container to load the installed profile.
-docker restart rhasspy >/dev/null
+# containers to load the installed profile and intent_handler.py.
+docker restart rhasspy rhasspy-intent-handler >/dev/null
 wait_ready
 echo "Downloading missing profile files..."
 curl -sf -m 3600 -X POST "$API/download-profile" >/dev/null

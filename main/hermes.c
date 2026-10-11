@@ -40,6 +40,11 @@ static char frame_topic[112];
 static char play_prefix[112];
 static char play_subscription[114];
 static char finished_topic[112];
+static char volume_topic[112];
+static volatile bool volume_dirty = true;
+/* Current dialogue session for this site (from sessionStarted), for stopListening. */
+static portMUX_TYPE session_lock = portMUX_INITIALIZER_UNLOCKED;
+static char session_id[96];
 #if CONFIG_AIVOX3_PTT_HOTWORD
 static const char hotword_topic[] = "hermes/hotword/push-to-talk/detected";
 #endif
@@ -116,6 +121,7 @@ static const char *const dialog_topics[] = {
     "hermes/dialogueManager/sessionStarted", "hermes/dialogueManager/sessionEnded",
     "hermes/asr/startListening", "hermes/asr/textCaptured",
     "hermes/nlu/intentNotRecognized", "hermes/intent/#", "hermes/tts/say",
+    "rhasspy/audioServer/setVolume",
 };
 
 static bool topic_is(const esp_mqtt_event_handle_t event, const char *name)
@@ -148,8 +154,17 @@ static void receive_dialog(esp_mqtt_event_handle_t event)
         return;
     }
     if (topic_is(event, "hermes/dialogueManager/sessionStarted")) {
+        const char *id = json_string(msg, "sessionId");
+        /* Echoed into JSON later: only keep IDs that fit and need no escaping. */
+        if (!id || strlen(id) >= sizeof(session_id) || strpbrk(id, "\"\\")) id = "";
+        portENTER_CRITICAL(&session_lock);
+        strlcpy(session_id, id, sizeof(session_id));
+        portEXIT_CRITICAL(&session_lock);
         show_text(DIALOG_SESSION, NULL);
     } else if (topic_is(event, "hermes/dialogueManager/sessionEnded")) {
+        portENTER_CRITICAL(&session_lock);
+        session_id[0] = '\0';
+        portEXIT_CRITICAL(&session_lock);
         const char *reason = json_string(cJSON_GetObjectItemCaseSensitive(msg, "termination"), "reason");
         show_text(DIALOG_ENDED, reason && strcmp(reason, "nominal") ? reason : NULL);
     } else if (topic_is(event, "hermes/asr/startListening")) {
@@ -162,6 +177,9 @@ static void receive_dialog(esp_mqtt_event_handle_t event)
         show_text(DIALOG_INTENT, json_string(cJSON_GetObjectItemCaseSensitive(msg, "intent"), "intentName"));
     } else if (topic_is(event, "hermes/tts/say")) {
         show_text(DIALOG_SPEAKING, json_string(msg, "text"));
+    } else if (topic_is(event, "rhasspy/audioServer/setVolume")) {
+        const cJSON *v = cJSON_GetObjectItemCaseSensitive(msg, "volume");
+        if (cJSON_IsNumber(v)) status_set_volume((int)(v->valuedouble * 100 + 0.5));
     }
     cJSON_Delete(msg);
 }
@@ -171,6 +189,7 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     esp_mqtt_event_handle_t event = data;
     if (id == MQTT_EVENT_CONNECTED) {
         mqtt_ready = true;
+        volume_dirty = true;
         status_set_state(playing ? STATUS_PLAYING : STATUS_CONNECTED);
         esp_mqtt_client_subscribe(event->client, play_subscription, 0);
         for (size_t i = 0; i < sizeof(dialog_topics) / sizeof(dialog_topics[0]); ++i)
@@ -235,6 +254,28 @@ static void playback_task(void *arg)
     }
 }
 
+#if CONFIG_AIVOX3_PUSH_TO_TALK
+/*
+ * Push-to-talk knows when speech ended: ask the ASR to finish now instead of
+ * waiting for its silence detection, which sometimes never triggered.
+ */
+static void stop_listening(void)
+{
+    char id[sizeof(session_id)];
+    portENTER_CRITICAL(&session_lock);
+    memcpy(id, session_id, sizeof(id));
+    portEXIT_CRITICAL(&session_lock);
+    if (!id[0] || !mqtt_ready) return;
+    char payload[200];
+    int len = snprintf(payload, sizeof(payload), "{\"siteId\":\"%s\",\"sessionId\":\"%s\"}",
+                       CONFIG_AIVOX3_HERMES_SITE_ID, id);
+    if (len > 0 && len < sizeof(payload)) {
+        esp_mqtt_client_publish(mqtt, "hermes/asr/stopListening", payload, len, 0, 0);
+        ESP_LOGI(TAG, "push-to-talk released: stopListening for %s", id);
+    }
+}
+#endif
+
 void hermes_run(i2s_chan_handle_t rx, i2s_chan_handle_t tx)
 {
     if (!CONFIG_AIVOX3_WIFI_SSID[0] || !CONFIG_AIVOX3_MQTT_URI[0]) {
@@ -256,6 +297,7 @@ void hermes_run(i2s_chan_handle_t rx, i2s_chan_handle_t tx)
     snprintf(play_prefix, sizeof(play_prefix), "hermes/audioServer/%s/playBytes/", site);
     snprintf(play_subscription, sizeof(play_subscription), "%s+", play_prefix);
     snprintf(finished_topic, sizeof(finished_topic), "hermes/audioServer/%s/playFinished", site);
+    snprintf(volume_topic, sizeof(volume_topic), "aivox3/%s/volume", site);
     speaker = tx;
     play_queue = xQueueCreate(2, sizeof(play_job_t));
     wifi_events = xEventGroupCreate();
@@ -303,6 +345,7 @@ void hermes_run(i2s_chan_handle_t rx, i2s_chan_handle_t tx)
     uint8_t *frame = heap_caps_malloc(WAV_HEADER_BYTES + FRAME_SAMPLES * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!frame) { ESP_LOGE(TAG, "no audio buffer"); return; }
     uint32_t frames = 0;
+    int published_volume = -1;
 #if CONFIG_AIVOX3_PUSH_TO_TALK
     int tail = 0, silence = 0;
 #endif
@@ -321,6 +364,18 @@ void hermes_run(i2s_chan_handle_t rx, i2s_chan_handle_t tx)
             ESP_LOGI(TAG, "push-to-talk: published hotword detected");
         }
 #endif
+        /* Retained so intent handlers know the volume for "lauter"/"leiser". */
+        int vol = status_volume();
+        if (mqtt_ready && (volume_dirty || vol != published_volume)) {
+            char payload[96];
+            int len = snprintf(payload, sizeof(payload), "{\"volume\":%d,\"siteId\":\"%s\"}",
+                               vol, CONFIG_AIVOX3_HERMES_SITE_ID);
+            if (len > 0 && len < sizeof(payload) &&
+                esp_mqtt_client_publish(mqtt, volume_topic, payload, len, 0, 1) >= 0) {
+                published_volume = vol;
+                volume_dirty = false;
+            }
+        }
         bool open = status_mic_open();
 #if CONFIG_AIVOX3_PUSH_TO_TALK
         if (open) {
@@ -329,6 +384,7 @@ void hermes_run(i2s_chan_handle_t rx, i2s_chan_handle_t tx)
         } else if (tail > 0) {
             --tail;
             open = true;
+            if (tail == 0) stop_listening();
         } else if (silence > 0) {
             --silence;
             memset(frame + WAV_HEADER_BYTES, 0, got);
