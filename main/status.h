@@ -42,5 +42,10 @@ typedef enum {
 /* Thread-safe; `text` is UTF-8 (converted to ASCII for the LCD), may be NULL. */
 void status_dialog(dialog_phase_t phase, const char *text, size_t len);
 
+/* Requests a speaker volume (0..100), applied by the status task. */
+void status_set_volume(int percent);
+/* Current speaker volume in percent. */
+int status_volume(void);
+
 /* Records one published frame and its absolute peak sample. */
 void status_note_frame(int peak);

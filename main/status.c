@@ -37,7 +37,7 @@ static volatile bool muted;
 #endif
 static volatile uint32_t ip_addr, frames;
 static volatile int peak_level;
-static int volume;
+static volatile int volume = CONFIG_AIVOX3_SPEAKER_VOLUME, requested_volume = -1;
 
 static portMUX_TYPE dialog_lock = portMUX_INITIALIZER_UNLOCKED;
 static dialog_phase_t dialog_phase;
@@ -107,6 +107,8 @@ bool status_take_ptt_press(void)
     return p;
 }
 void status_note_frame(int peak) { ++frames; peak_level = peak; }
+void status_set_volume(int percent) { requested_volume = percent < 0 ? 0 : percent > 100 ? 100 : percent; }
+int status_volume(void) { return volume; }
 
 typedef struct { const char *label; uint8_t r, g, b; uint16_t lcd; bool blink; } look_t;
 
@@ -143,11 +145,24 @@ static bool pressed(button_t *b)
     return edge;
 }
 
-static void set_volume(int index)
+#define VOLUME_STEPS ((int)(sizeof(volume_steps) / sizeof(volume_steps[0])))
+
+static void apply_volume(int percent)
 {
-    volume = volume_steps[index];
-    if (es8311_voice_volume_set(codec, volume, NULL) != ESP_OK) ESP_LOGW(TAG, "volume change failed");
-    else ESP_LOGI(TAG, "speaker volume %d", volume);
+    if (es8311_voice_volume_set(codec, percent, NULL) != ESP_OK) {
+        ESP_LOGW(TAG, "volume change failed");
+        return;
+    }
+    volume = percent;
+    ESP_LOGI(TAG, "speaker volume %d", percent);
+}
+
+/* Index of the first step above `percent`, so button B always gets louder first. */
+static int next_step(int percent)
+{
+    for (int i = 0; i < VOLUME_STEPS; ++i)
+        if (volume_steps[i] > percent) return i;
+    return 0;
 }
 
 static int level_width(int peak)
@@ -202,9 +217,6 @@ static void draw_info(char cache[INFO_ROWS][32], bool force)
 static void status_task(void *arg)
 {
     button_t a = {AIVOX3_BUTTON_A, 1, 1}, b = {AIVOX3_BUTTON_B, 1, 1};
-    int step = 0;
-    while (step + 1 < (int)(sizeof(volume_steps) / sizeof(volume_steps[0])) &&
-           volume_steps[step] < CONFIG_AIVOX3_SPEAKER_VOLUME) ++step;
     volume = CONFIG_AIVOX3_SPEAKER_VOLUME;
     bool lcd = lcd_ready();
     char cache[INFO_ROWS][32] = {{0}};
@@ -224,9 +236,11 @@ static void status_task(void *arg)
             ESP_LOGI(TAG, "microphone %s", muted ? "muted" : "unmuted");
         }
 #endif
-        if (pressed(&b)) {
-            step = (step + 1) % (int)(sizeof(volume_steps) / sizeof(volume_steps[0]));
-            set_volume(step);
+        if (pressed(&b)) apply_volume(volume_steps[next_step(volume)]);
+        int req = requested_volume;
+        if (req >= 0) {
+            requested_volume = -1;
+            apply_volume(req);
         }
         status_state_t s = state;
         bool m = status_mic_open();
