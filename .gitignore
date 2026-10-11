@@ -1,0 +1,13 @@
+build/
+build-lcd/
+build-hermes/
+build-format/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+sdkconfig.lcd
+sdkconfig.hermes
+sdkconfig.format
+.tools/
+backup/

@@ -1,0 +1,52 @@
+menu "AI-VOX3 hardware self-test"
+    config AIVOX3_ENABLE_LCD
+        bool "Initialize optional ST7789 LCD"
+        default n
+    config AIVOX3_AUDIO_LOOPBACK_SECONDS
+        int "Audio loopback duration in seconds"
+        range 0 10
+        default 2
+    config AIVOX3_SPEAKER_VOLUME
+        int "Speaker volume (0..100)"
+        range 0 100
+        default 55
+    config AIVOX3_MIC_GAIN_DB
+        int "Microphone PGA gain in dB (multiple of 6)"
+        range 0 42
+        default 24
+        help
+            Rounded down to the nearest 6-dB step supported by the ES8311.
+    config AIVOX3_FORMAT_SD_ONCE
+        bool "DANGER: format inserted microSD if it has no valid FAT volume"
+        default n
+endmenu
+
+menu "Hermes voice satellite"
+    config AIVOX3_HERMES_ENABLE
+        bool "Enable Hermes MQTT audio satellite after self-test"
+        default n
+    config AIVOX3_WIFI_SSID
+        string "Wi-Fi SSID"
+        depends on AIVOX3_HERMES_ENABLE
+        default ""
+    config AIVOX3_WIFI_PASSWORD
+        string "Wi-Fi password (embedded in firmware)"
+        depends on AIVOX3_HERMES_ENABLE
+        default ""
+    config AIVOX3_MQTT_URI
+        string "MQTT broker URI (mqtt://host:1883)"
+        depends on AIVOX3_HERMES_ENABLE
+        default ""
+    config AIVOX3_MQTT_USERNAME
+        string "MQTT username (optional)"
+        depends on AIVOX3_HERMES_ENABLE
+        default ""
+    config AIVOX3_MQTT_PASSWORD
+        string "MQTT password (embedded in firmware)"
+        depends on AIVOX3_HERMES_ENABLE
+        default ""
+    config AIVOX3_HERMES_SITE_ID
+        string "Hermes site ID (letters, digits, dash, underscore)"
+        depends on AIVOX3_HERMES_ENABLE
+        default "ai-vox3"
+endmenu
