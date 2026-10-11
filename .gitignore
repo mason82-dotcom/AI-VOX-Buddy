@@ -11,3 +11,4 @@ sdkconfig.hermes
 sdkconfig.format
 .tools/
 backup/
+__pycache__/

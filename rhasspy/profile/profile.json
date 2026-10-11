@@ -1,0 +1,38 @@
+{
+    "dialogue": {
+        "system": "rhasspy"
+    },
+    "handle": {
+        "system": "dummy"
+    },
+    "intent": {
+        "system": "fsticuffs"
+    },
+    "microphone": {
+        "system": "hermes"
+    },
+    "mqtt": {
+        "enabled": "true",
+        "host": "localhost",
+        "port": "1883",
+        "site_id": "ai-vox3"
+    },
+    "sounds": {
+        "system": "hermes",
+        "wake": "/profiles/de/sounds/wake.wav",
+        "recorded": "/profiles/de/sounds/recorded.wav",
+        "error": "/profiles/de/sounds/error.wav"
+    },
+    "speech_to_text": {
+        "system": "vosk"
+    },
+    "text_to_speech": {
+        "system": "command",
+        "command": {
+            "say_program": "/profiles/de/tts.sh"
+        }
+    },
+    "wake": {
+        "system": "dummy"
+    }
+}
