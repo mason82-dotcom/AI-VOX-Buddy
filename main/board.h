@@ -1,0 +1,28 @@
+#pragma once
+#include "driver/gpio.h"
+
+/* Verified against nulllaborg AI-VOX3 schematic V1.1. */
+#define AIVOX3_I2S_DOUT GPIO_NUM_7
+#define AIVOX3_I2S_WS GPIO_NUM_8
+#define AIVOX3_I2S_DIN GPIO_NUM_9
+#define AIVOX3_I2S_BCLK GPIO_NUM_10
+#define AIVOX3_I2S_MCLK GPIO_NUM_11
+#define AIVOX3_I2C_SCL GPIO_NUM_12
+#define AIVOX3_I2C_SDA GPIO_NUM_13
+#define AIVOX3_LCD_DC GPIO_NUM_14
+#define AIVOX3_LCD_CS GPIO_NUM_15
+#define AIVOX3_LCD_BL GPIO_NUM_16
+#define AIVOX3_LCD_SCLK GPIO_NUM_17
+#define AIVOX3_LCD_MOSI GPIO_NUM_21
+#define AIVOX3_SD_CMD GPIO_NUM_38
+#define AIVOX3_SD_CLK GPIO_NUM_39
+#define AIVOX3_SD_D0 GPIO_NUM_40
+#define AIVOX3_RGB GPIO_NUM_41
+#define AIVOX3_BOOT GPIO_NUM_0
+#define AIVOX3_BUTTON_B GPIO_NUM_45
+#define AIVOX3_BUTTON_A GPIO_NUM_46
+#define AIVOX3_BATTERY_ADC GPIO_NUM_18
+#define AIVOX3_CHARGE GPIO_NUM_47
+/* NS4150B enable is hardware-controlled. GPIO53 in a vendor demo is invalid. */
+#define AIVOX3_PA_ENABLE GPIO_NUM_NC
+_Static_assert(AIVOX3_PA_ENABLE == GPIO_NUM_NC, "Never use invalid GPIO53");
