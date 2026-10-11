@@ -199,8 +199,10 @@ void hermes_run(i2s_chan_handle_t rx, i2s_chan_handle_t tx)
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_set_config(WIFI_IF_STA, &config);
     esp_wifi_start();
-    /* Modem sleep adds latency and jitter to the continuous audio stream. */
+#if CONFIG_AIVOX3_WIFI_NO_POWER_SAVE
+    /* Lower latency, but the constant RF activity can disturb USB on this board. */
     esp_wifi_set_ps(WIFI_PS_NONE);
+#endif
     ESP_LOGI(TAG, "waiting for Wi-Fi");
     xEventGroupWaitBits(wifi_events, WIFI_READY, pdFALSE, pdTRUE, portMAX_DELAY);
     esp_mqtt_client_config_t mqtt_config = {

@@ -45,6 +45,13 @@ menu "Hermes voice satellite"
         string "MQTT password (embedded in firmware)"
         depends on AIVOX3_HERMES_ENABLE
         default ""
+    config AIVOX3_WIFI_NO_POWER_SAVE
+        bool "Disable Wi-Fi power saving (lower latency)"
+        depends on AIVOX3_HERMES_ENABLE
+        default n
+        help
+            Keeps the radio permanently active. On the AI-VOX3 this made the
+            USB Serial/JTAG console unresponsive (host USB error -71).
     config AIVOX3_HERMES_SITE_ID
         string "Hermes site ID (letters, digits, dash, underscore)"
         depends on AIVOX3_HERMES_ENABLE
