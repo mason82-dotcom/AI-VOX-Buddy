@@ -83,7 +83,10 @@ default build has Hermes disabled and needs no credentials. Playback accepts
 only 16-bit PCM WAV, with a 512-KB message limit; compressed or float formats
 and longer TTS messages need conversion/chunking upstream. Request IDs must be
 1..64 printable ASCII characters without space, quote, backslash, `/`, `+` or
-`#`. Wi-Fi power saving is disabled in this mode to keep audio latency low.
+`#`. Wi-Fi keeps ESP-IDF's default modem power saving. The menuconfig option
+"Disable Wi-Fi power saving" lowers latency, but on the tested board the
+permanently active radio made the USB Serial/JTAG console unresponsive (host
+USB error -71, no log output, DTR/RTS reset failing) while MQTT kept working.
 The satellite runs in its own 8-KB task. To flash it, use
 `AIVOX3_BUILD_DIR=build-hermes AIVOX3_HERMES_FLASH_APPROVED=yes` in addition to
 the normal flash variables below, and `AIVOX3_BUILD_DIR=build-hermes
@@ -176,3 +179,14 @@ The LCD profile initially left the panel white: esp_lcd's ST7789 driver only
 leaves sleep mode, so the firmware now sends `DISPON` explicitly. With that
 fix the LCD profile showed red, green and blue bands top to bottom across
 the full panel (visually confirmed by the user).
+
+Hermes satellite on-device test with the Raspberry Pi's local Mosquitto
+broker (anonymous, LAN only): Wi-Fi and MQTT connected, `audioFrame` streamed
+10 frames/s at 3,244 bytes (44-byte header + 100 ms PCM). A 1.5-s
+22.05-kHz stereo test WAV sent to `playBytes/<id>` was converted to 16-kHz
+mono, audibly played (confirmed by the user) and acknowledged with
+`playFinished` carrying the request ID. With Wi-Fi power saving disabled the
+USB console stopped responding; with the default power saving it stayed
+usable with no USB errors. Recovery needed the manual download mode (hold
+BOOT, press PWR/reset) and `esptool.py --before no_reset --after
+watchdog_reset`, because an RTS hard reset left the chip in the bootloader.

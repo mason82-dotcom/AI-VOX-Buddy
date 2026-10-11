@@ -5,7 +5,7 @@ build-format/
 managed_components/
 dependencies.lock
 sdkconfig
-sdkconfig.old
+sdkconfig*.old
 sdkconfig.lcd
 sdkconfig.hermes
 sdkconfig.format
