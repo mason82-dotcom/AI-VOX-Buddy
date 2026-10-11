@@ -9,7 +9,7 @@ menu "AI-VOX3 hardware self-test"
     config AIVOX3_SPEAKER_VOLUME
         int "Speaker volume (0..100)"
         range 0 100
-        default 55
+        default 40
     config AIVOX3_MIC_GAIN_DB
         int "Microphone PGA gain in dB (multiple of 6)"
         range 0 42
@@ -45,6 +45,20 @@ menu "Hermes voice satellite"
         string "MQTT password (embedded in firmware)"
         depends on AIVOX3_HERMES_ENABLE
         default ""
+    config AIVOX3_PUSH_TO_TALK
+        bool "Push-to-talk: stream the microphone only while button A is held"
+        depends on AIVOX3_HERMES_ENABLE
+        default y
+        help
+            When disabled, the microphone streams continuously and button A
+            toggles mute instead.
+    config AIVOX3_PTT_HOTWORD
+        bool "Publish hermes/hotword/push-to-talk/detected when A is pressed"
+        depends on AIVOX3_PUSH_TO_TALK
+        default y
+        help
+            Lets a Hermes dialogue manager (e.g. Rhasspy) start a session as
+            if a wake word had been detected.
     config AIVOX3_WIFI_NO_POWER_SAVE
         bool "Disable Wi-Fi power saving (lower latency)"
         depends on AIVOX3_HERMES_ENABLE

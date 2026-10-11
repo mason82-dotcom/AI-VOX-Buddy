@@ -1,1 +1,3 @@
 CONFIG_AIVOX3_HERMES_ENABLE=y
+# The LCD shows the satellite status.
+CONFIG_AIVOX3_ENABLE_LCD=y
