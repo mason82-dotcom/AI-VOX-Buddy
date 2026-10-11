@@ -99,6 +99,7 @@ format, `./scripts/build-format.sh` creates a separate image. It enables
 and creates a FAT volume if no valid FAT volume can be mounted. This erases
 existing data on the inserted microSD. After verifying the mount, flash the
 normal `build/` image again so future cards cannot be formatted automatically.
+The flash script also accepts `AIVOX3_BUILD_DIR=build-lcd` for the LCD profile.
 The guarded flash script accepts `AIVOX3_BUILD_DIR=build-format` only with the
 additional `AIVOX3_SD_FORMAT_APPROVED=yes` flag.
 
@@ -168,3 +169,10 @@ on the inserted `AFGCC` SDHC card (15,193 MB reported capacity). It was then
 replaced with the normal self-test image. The final serial run reported
 `[PASS] microSD: ESP_OK` and `[PASS] audio loopback: ESP_OK`; the normal image
 has `AIVOX3_FORMAT_SD_ONCE` disabled, so it will not format other cards.
+
+After the partition-table change, the default image was flashed again: the
+bootloader reports the 4-MB `factory` partition and all self-tests passed.
+The LCD profile initially left the panel white: esp_lcd's ST7789 driver only
+leaves sleep mode, so the firmware now sends `DISPON` explicitly. With that
+fix the LCD profile showed red, green and blue bands top to bottom across
+the full panel (visually confirmed by the user).
